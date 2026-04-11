@@ -8,9 +8,7 @@ from typing import Any, List, Optional, Tuple
 import pandas as pd
 pd.options.display.encoding = 'utf-8'
 
-# -------------------- VQAEval --------------------
-import re
-
+# -------------------- VQAEval (未修改) --------------------
 def normalize_text(s):
     """小写化、去标点、去掉多余空格"""
     s = s.lower()
@@ -125,7 +123,7 @@ class VQAEval:
             g = self.processDigitArticle(g)
             return 1 if has_word(answer, g) else 0
 
-# -------------------- Triple 解析 --------------------
+# -------------------- Triple 解析 (未修改) --------------------
 Triple = Tuple[str, str, str]
 
 def _to_list(obj: Any) -> Optional[List]:
@@ -180,7 +178,7 @@ def parse_triples(field: Any) -> List[Triple]:
                 if tr2: triples.append(tr2)
     return triples
 
-# -------------------- Triple 评估 --------------------
+# -------------------- 评估函数 (未修改) --------------------
 def _triple_match_vqa(pred_triple, gt_triple, vqa) -> bool:
     hp, rp, tp = pred_triple
     hg, rg, tg = gt_triple
@@ -207,7 +205,6 @@ def eval_triple_exact_em(pred: str, gt, vqa) -> int:
             return 0
     return 1
 
-# -------------------- List 答案评估 --------------------
 def eval_list_answer(pred, gt, vqa) -> int:
     pred_list = _to_list(pred)
     gt_list = _to_list(gt)
@@ -227,160 +224,129 @@ def eval_list_answer(pred, gt, vqa) -> int:
             return 0
     return 1
 
-# -------------------- 非 triple 答案评估 --------------------
 def eval_non_triple(pred: str, gt, category: str, vqa) -> int:
     if category.lower() in ["color_list", "text"]:
         return eval_list_answer(pred, gt, vqa)
     else:
         return vqa.evaluate(pred, gt)
 
-# -------------------- Main --------------------
+# -------------------- Main (核心修改部分) --------------------
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--tsv", required=True)
-    ap.add_argument("--pred", required=True)
-    ap.add_argument("--per-sample-out", required=True)
-    ap.add_argument("--summary-out", required=True)
+    ap = argparse.ArgumentParser(description="Evaluate a single JSONL file containing both ground truth and predictions.")
+    ap.add_argument("--input", required=True, help="Input JSONL file containing both predictions and ground truth.")
+    ap.add_argument("--out-jsonl", help="Output JSONL file (defaults to input_name_evaluated.jsonl).")
+    ap.add_argument("--out-txt", help="Output summary TXT file (defaults to input_name_summary.txt).")
     args = ap.parse_args()
 
-    # 读取数据
-    df_gt = pd.read_json(args.tsv, lines=True, dtype=str)
-    df_pred = pd.read_json(args.pred, lines=True, dtype=str)
+    in_name = args.input.rsplit(".", 1)[0]
+    out_jsonl = args.out_jsonl if args.out_jsonl else f"{in_name}_evaluated.jsonl"
+    out_txt = args.out_txt if args.out_txt else f"{in_name}_summary.txt"
 
-    # 确保 knowledge 列统一
-    df_pred.rename(columns={'knowledge': 'knowledge_column'}, inplace=True)
-    df_gt.rename(columns={'knowledge': 'knowledge_column'}, inplace=True)
+    # 读取原始 JSONL 数据（使用内置 json 库保证输出时结构和类型完美保留）
+    records = []
+    with open(args.input, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                records.append(json.loads(line))
+    
+    if not records:
+        print("Input file is empty.")
+        return
 
-    df_ref = df_gt
-
-    # 自动检测列
-    def _find_col(df, candidates):
-        cmap = {c.lower(): c for c in df.columns}
+    # 动态匹配列名（寻找 gt 和 pred 的 key）
+    def _find_key(keys, candidates):
+        cmap = {k.lower(): k for k in keys}
         for c in candidates:
             if c.lower() in cmap:
                 return cmap[c.lower()]
         return None
 
-    id_gt = _find_col(df_gt, ["index", "id"]) or "index"
-    id_pred = _find_col(df_pred, ["index", "id"]) or "index"
-    gt_col = _find_col(df_gt, ["answer", "answers", "gt_answers", "label"])
-    pred_col = _find_col(df_pred, ["prediction", "answer", "pred", "output", "model_answer", "response"])
-    cat_col_src = _find_col(df_pred, ["category", "cat", "type", "task_type"]) \
-                  or _find_col(df_gt, ["category", "cat", "type", "task_type"])
-    hop_col_src = _find_col(df_pred, ["hop", "hops", "num_hop", "num_hops"]) \
-                  or _find_col(df_gt, ["hop", "hops", "num_hop", "num_hops"])
+    first_keys = list(records[0].keys())
+    # 严格区分 gt_key 和 pred_key 的候选项，防止匹配冲突
+    gt_key = _find_key(first_keys, ["gt_answers", "label", "ground_truth", "answer", "answers"])
+    pred_key = _find_key(first_keys, ["prediction", "pred", "output", "model_answer", "response"])
+    cat_key = _find_key(first_keys, ["category", "cat", "type", "task_type"])
+    hop_key = _find_key(first_keys, ["hop", "hops", "num_hop", "num_hops"])
+    know_key = _find_key(first_keys, ["knowledge"])
+    type_key = _find_key(first_keys, ["type", "reasoning_type", "reason_type", "reasoning_cat"])
 
-    # 合并数据
-    df_gt[id_gt] = df_gt[id_gt].astype(str)
-    df_pred[id_pred] = df_pred[id_pred].astype(str)
-    keep_cols = [id_pred, pred_col] + ([cat_col_src] if cat_col_src else []) + ([hop_col_src] if hop_col_src else []) + ["knowledge_column"]
-    merged = pd.merge(
-        df_gt[[id_gt, gt_col]],
-        df_pred[keep_cols],
-        left_on=id_gt, right_on=id_pred, how="inner",
-        suffixes=("_tsv", "_pred")
-    )
+    if not gt_key or not pred_key:
+        raise ValueError(f"Could not automatically detect ground truth column or prediction column. Found keys: {first_keys}")
 
-    gt_col_m = gt_col
-    pred_col_m = pred_col
-    cat_col_m = cat_col_src
-    hop_col_m = hop_col_src
-
-    # per-sample 评估
     vqa = VQAEval()
-    recs = []
-    for _, r in merged.iterrows():
-        idx = r[id_gt]
-        gt = r[gt_col_m]
-        pred = r[pred_col_m]
-        cat = str(r[cat_col_m]) if cat_col_m and pd.notna(r[cat_col_m]) else ""
-        hop = str(r[hop_col_m]) if hop_col_m and pd.notna(r[hop_col_m]) else ""
+    recs_for_summary = []
 
+    # 逐行评估
+    for row in records:
+        gt = str(row.get(gt_key, ""))
+        pred = str(row.get(pred_key, ""))
+        cat = str(row.get(cat_key, "")) if cat_key and row.get(cat_key) is not None else ""
+        hop = str(row.get(hop_key, "")) if hop_key and row.get(hop_key) is not None else ""
+        knowledge_raw = row.get(know_key) if know_key else None
+        type_val = str(row.get(type_key, "")) if type_key and row.get(type_key) is not None else ""
+
+        # 执行评测
         is_triple = (cat.strip().lower() == "graph understand triple")
         if is_triple:
             ok = eval_triple_exact_em(pred, gt, vqa)
         else:
             ok = eval_non_triple(pred, gt, cat, vqa)
 
-        knowledge = r.get("knowledge_column", None)
-        if pd.isna(knowledge) or knowledge == "null":
+        # ✨ 核心：在原数据上直接新增 correct 属性
+        row["correct"] = ok
+
+        # 清洗 knowledge 用于统计（保持你原先的代码逻辑）
+        if knowledge_raw is None or str(knowledge_raw).lower() == "null":
             knowledge = "null"
         else:
-            knowledge = str(int(float(knowledge))) if str(knowledge).replace(".","",1).isdigit() else str(knowledge)
+            knowledge = str(int(float(knowledge_raw))) if str(knowledge_raw).replace(".","",1).isdigit() else str(knowledge_raw)
 
-        recs.append({
-            "index": idx, "answer": gt, "prediction": pred,
-            "category": cat, "hop": hop, "knowledge": knowledge, "correct": ok
+        recs_for_summary.append({
+            "category": cat,
+            "hop": hop,
+            "knowledge": knowledge,
+            "type": type_val,
+            "correct": ok
         })
 
-    df_sample = pd.DataFrame(recs)
+    # 将增加了 'correct' 的完整字典重新写入 JSONL
+    with open(out_jsonl, "w", encoding="utf-8") as f:
+        for row in records:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    print(f"[OK] Evaluated samples saved to -> {out_jsonl}")
 
-    # Category 归并
+    # ==============================================================
+    # 以下为 Pandas 统计逻辑（完美复刻你原来的聚合方式）
+    # ==============================================================
+    df_sample = pd.DataFrame(recs_for_summary)
+
     category_map = {
         "graph understand triple": "graph understand",
         "graph understand": "graph understand",
         "color_list": "color",
         "color": "color"
     }
+    df_sample["category"] = df_sample["category"].astype(str).str.strip().str.lower().map(lambda x: category_map.get(x, x))
 
-    df_sample["category"] = (
-        df_sample["category"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .map(lambda x: category_map.get(x, x))
-    )
-
-    # Accuracy 统计
     total_samples = len(df_sample)
     overall_acc = df_sample["correct"].mean() if total_samples > 0 else 0.0
 
-    # 新增：根据 hop 字段，把 hop reasoning 类别细分
     def _split_hop_reasoning(row):
-        cat = str(row["category"]).strip().lower()
-        hop = str(row["hop"]).strip()
-        if cat == "hop reasoning":
-            if hop == "1":
-                return "hop reasoning(1)"
-            elif hop in ["2", "3"]:
-                return "hop reasoning(2/3)"
-        return cat
+        c = str(row["category"]).strip().lower()
+        h = str(row["hop"]).strip()
+        if c == "hop reasoning":
+            if h == "1": return "hop reasoning(1)"
+            elif h in ["2", "3"]: return "hop reasoning(2/3)"
+        return c
 
     df_sample["category_split"] = df_sample.apply(_split_hop_reasoning, axis=1)
 
-    # 分组统计
-    by_cat = (
-        df_sample.groupby("category_split", dropna=False)["correct"]
-        .agg(["count", "mean"])
-        .reset_index()
-        .rename(columns={"mean": "acc", "category_split": "category"})
-    )
-    by_hop = (
-        df_sample.groupby("hop", dropna=False)["correct"]
-        .agg(["count", "mean"])
-        .reset_index()
-        .rename(columns={"mean": "acc"})
-    )
-    by_knowledge = (
-        df_sample.groupby("knowledge", dropna=False)["correct"]
-        .agg(["count", "mean"])
-        .reset_index()
-        .rename(columns={"mean": "acc"})
-    )
-    # ==== 按类别统计 ====
-    by_category = (
-        df_sample.groupby("category", dropna=False)["correct"]
-        .agg(["count", "mean"])
-        .reset_index()
-        .rename(columns={"mean": "acc"})
-    )
-
-    # ==== 按 reasoning type 统计 ====
-    type_col = _find_col(df_ref, ["type", "reasoning_type", "reason_type", "reasoning_cat"])
-    if type_col and type_col in df_ref.columns:
-        merged_type = merged.copy()
-        merged_type["type"] = df_ref[type_col].astype(str).str.strip().str.lower()
-        df_sample["type"] = merged_type["type"]
+    by_cat = df_sample.groupby("category_split", dropna=False)["correct"].agg(["count", "mean"]).reset_index().rename(columns={"mean": "acc", "category_split": "category"})
+    by_hop = df_sample.groupby("hop", dropna=False)["correct"].agg(["count", "mean"]).reset_index().rename(columns={"mean": "acc"})
+    by_knowledge = df_sample.groupby("knowledge", dropna=False)["correct"].agg(["count", "mean"]).reset_index().rename(columns={"mean": "acc"})
+    
+    # Reasoning type 统计
+    if type_key:
         by_reasoning_type = (
             df_sample[df_sample["category"].str.contains("reasoning", case=False, na=False)]
             .groupby("type", dropna=False)["correct"]
@@ -391,11 +357,6 @@ def main():
     else:
         by_reasoning_type = pd.DataFrame(columns=["type", "count", "acc"])
 
-    # 输出 per-sample
-    df_sample.to_json(args.per_sample_out, orient="records", lines=True, force_ascii=False)
-    print(f"[OK] per-sample -> {args.per_sample_out}")
-
-    # 输出 summary text
     def _fmt_percent(x):
         return f"{x*100:.2f}%"
 
@@ -421,24 +382,11 @@ def main():
         return "\n".join(lines)
 
     report_text = _build_report_text(total_samples, overall_acc, by_cat, by_hop, by_knowledge)
-    with open(args.summary_out, "w", encoding="utf-8") as f:
+    
+    with open(out_txt, "w", encoding="utf-8") as f:
         f.write(report_text)
-    print(f"[OK] summary (text) -> {args.summary_out}")
+    print(f"[OK] summary (text) -> {out_txt}")
     print("\n" + report_text)
-
-    # summary JSONL
-    jsonl_out = args.summary_out.rsplit(".",1)[0]+".jsonl"
-    summary_dict = {
-        "total_samples": total_samples,
-        "overall_acc": overall_acc,
-        "by_category": by_cat.to_dict(orient="records"),
-        "by_hop": by_hop.to_dict(orient="records"),
-        "by_knowledge": by_knowledge.to_dict(orient="records"),
-        "by_reasoning_type": by_reasoning_type.to_dict(orient="records")
-    }
-    with open(jsonl_out, "w", encoding="utf-8") as f:
-        json.dump(summary_dict, f, ensure_ascii=False, indent=2)
-    print(f"[OK] summary (jsonl) -> {jsonl_out}")
 
 if __name__ == "__main__":
     main()
