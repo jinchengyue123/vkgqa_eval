@@ -1,5 +1,3 @@
-这是一个为你定制的 `README.md` 文档，你可以直接复制以下内容并在你的项目仓库或文件夹中使用。
-
 ***
 
 # VKG-QA 评测脚本 (Evaluation Script)
@@ -14,15 +12,6 @@
 * **智能 VQA 匹配**：内置标准 VQA 评测逻辑，自动处理大小写、标点符号、缩写（如 `ain't` -> `ain't` 转换处理）和冠词（a/an/the）。
 * **三元组无序评估**：针对 `graph understand triple` 任务，支持将字符串解析为 `(head, relation, tail)` 列表，并进行无序 Exact Match 评估。
 * **无损数据注入**：在输出带有评测结果的新 JSONL 时，完美保留原始文件的所有字段，仅在每行末尾新增 `"correct": 1/0` 属性。
-
-## 🛠️ 环境依赖 (Dependencies)
-
-* Python 3.7+
-* `pandas`
-
-```bash
-pip install pandas
-```
 
 ## 🚀 快速开始 (Quick Start)
 
